@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>国考报名人数 · 自然山峦图 | 交互式地形可视化</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+        }
+        body {
+            background: linear-gradient(145deg, #e0e8f0 0%, #cbd8e6 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Segoe UI', 'Roboto', 'Microsoft YaHei', sans-serif;
+            padding: 20px;
+        }
+        .container {
+            background: #fef9e8;
+            border-radius: 48px;
+            box-shadow: 0 25px 45px rgba(0,0,0,0.3), inset 0 1px 2px rgba(255,255,255,0.6);
+            padding: 20px 25px 25px 25px;
+        }
+        canvas {
+            display: block;
+            margin: 0 auto;
+            border-radius: 28px;
+            box-shadow: 0 12px 28px rgba(0,0,0,0.2);
+            cursor: pointer;
+            background-color: #fef6e0;
+            transition: all 0.2s;
+        }
+        canvas:active {
+            transform: scale(0.99);
+        }
+        .info-panel {
+            margin-top: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            background: rgba(30,40,50,0.7);
+            backdrop-filter: blur(8px);
+            border-radius: 60px;
+            padding: 12px 24px;
+            color: white;
+            font-weight: 500;
+        }
+        .click-feedback {
+            background: #2c3e2f;
+            padding: 8px 20px;
+            border-radius: 40px;
+            font-size: 1rem;
+            box-shadow: inset 0 1px 3px rgba(0,0,0,0.3), 0 2px 4px rgba(255,255,255,0.2);
+        }
+        .legend {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+            font-size: 0.85rem;
+        }
+        .legend-color {
+            width: 28px;
+            height: 18px;
+            border-radius: 20px;
+            display: inline-block;
+            margin-right: 6px;
+            box-shadow: inset 0 1px 2px rgba(0,0,0,0.1);
+        }
+        .note {
+            font-size: 0.75rem;
+            opacity: 0.8;
+            letter-spacing: 0.5px;
+        }
+        @media (max-width: 850px) {
+            .container { padding: 15px; }
+            .info-panel { flex-direction: column; align-items: stretch; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+<div>
+    <div class="container">
+        <canvas id="mountainCanvas" width="1100" height="720" style="width:100%; height:auto; max-width:1100px; aspect-ratio:1100/720"></canvas>
+        <div class="info-panel">
+            <div class="click-feedback" id="clickStatus">🏔️ 点击任意山峰 —— 查看报考数据</div>
+            <div class="legend">
+                <span><span class="legend-color" style="background:#ffdd88;"></span> 人数较少</span>
+                <span><span class="legend-color" style="background:#66bb66;"></span> 人数中等</span>
+                <span><span class="legend-color" style="background:#3377bb;"></span> 人数众多</span>
+                <span class="note">※ 横轴：报考人数(万人) &nbsp;&nbsp; 纵轴：年份(垂直排列)</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    (function(){
+        // ----------------------------- 国考数据 (2020～2026) ----------------------------------
+        const years = [2020, 2021, 2022, 2023, 2024, 2025, 2026];
+        const applicants = [1346861, 1573005, 2023641, 2502540, 2902394, 3141455, 3524725];
+        const applicants_wan = applicants.map(v => v / 10000);   // 万人
+        
+        // 归一化人数 (0~1) 用于颜色映射
+        const minApp = Math.min(...applicants);
+        const maxApp = Math.max(...applicants);
+        const normApp = applicants.map(v => (v - minApp) / (maxApp - minApp));
+        
+        // 画布元素
+        const canvas = document.getElementById('mountainCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // 尺寸参数 (固定宽高比, 但为精确控制，使用固定逻辑像素)
+        let width = 1100;
+        let height = 720;
+        canvas.width = width;
+        canvas.height = height;
+        
+        // 布局参数: 每座山垂直间距 (px)
+        const vertSpacing = 82;      // 山与山的垂直距离
+        const bottomBase = height - 65;   // 最底部山(2026年)的基线Y坐标, 留白标签空间
+        // 年顺序: 2020(顶) -> 2026(底)  绘图时从底向上绘制 (2026先画)
+        const n = years.length;
+        
+        // 存储每座山的轮廓多边形 (点击检测用, 存储的是多边形点集{x,y})
+        const mountainPolygons = [];   // 索引 i 对应 years[i]
+        
+        // 颜色插值函数 (黄->绿->蓝)
+        function getColorByNorm(t) {
+            // t : 0~1  黄(1,0.9,0.5) -> 绿(0.4,0.8,0.5) -> 蓝(0.2,0.5,0.9)
+            const r = t < 0.5 ? (1 - t*1.2) : (0.4 - (t-0.5)*0.4);
+            const g = t < 0.5 ? (0.9 - t*0.2) : (0.8 - (t-0.5)*0.6);
+            const b = 0.5 + t * 0.5;
+            return {r: Math.min(1, Math.max(0, r)), g: Math.min(1, Math.max(0, g)), b: Math.min(1, Math.max(0, b))};
+        }
+        
+        // 颜色亮度调节
+        function lightenColor(rgb, factor) {
+            return {
+                r: Math.min(1, rgb.r * factor),
+                g: Math.min(1, rgb.g * factor),
+                b: Math.min(1, rgb.b * factor)
+            };
+        }
+        
+        // ========== 生成真实地形轮廓 (多层噪声 + 棱角纹理) ==========
+        // 返回 { xPoints: [], layers: [ [y1], [y2], ... ] }   xPoints为横坐标(万人), layers每层相对高度(0~峰高)
+        function generateRockyMountain(centerWan, yearIndex, peakHeightPx, baseY, nLayers=6, nPoints=240) {
+            // 年索引影响随机种子(确保每年形状唯一且稳定)
+            const seed = yearIndex + 2020;
+            let rng = (function(s) {
+                return function() {
+                    s = (s * 9301 + 49297) % 233280;
+                    return s / 233280;
+                };
+            })(seed);
+            
+            // 动态宽度: 左右延伸范围 (万人)
+            const widthLeft = 38 + 12 * Math.sin(yearIndex * 1.7);    // 26~50
+            const widthRight = 48 + 18 * Math.cos(yearIndex * 0.9);   // 30~66
+            let xMin = Math.max(0, centerWan - widthLeft);
+            let xMax = centerWan + widthRight;
+            // 保证最小宽度
+            if (xMax - xMin < 35) xMax = xMin + 45;
+            
+            const xVals = [];
+            const step = (xMax - xMin) / (nPoints - 1);
+            for (let i = 0; i < nPoints; i++) {
+                xVals.push(xMin + i * step);
+            }
+            
+            // 1. 基础骨架 (偏态分布 + 副峰)
+            const skewA = 3.8 * Math.sin(yearIndex * 1.2);    // -3.8~3.8
+            const locOffset = 4.2 * Math.cos(yearIndex * 1.5); // 峰位偏移(万人)
+            const mainScale = 9.5 + 5.5 * Math.sin(yearIndex * 1.3);
+            const subLoc = centerWan + 16 * Math.cos(yearIndex * 2.2 + 1.2);
+            const subScale = 5.2 + 3.2 * Math.sin(yearIndex);
+            const subAmp = 0.38 + 0.22 * Math.sin(yearIndex);
+            
+            let baseCurve = new Array(nPoints).fill(0);
+            for (let i = 0; i < nPoints; i++) {
+                let x = xVals[i];
+                // 偏态正态分布近似 (使用简单公式: exp(-0.5*((x-loc)/scale)^2) * (1+erf... 简化用skew公式?)
+                // 利用高斯变形: 右偏 (a>0)
+                let z = (x - (centerWan + locOffset)) / mainScale;
+                let skewFactor = Math.exp(-Math.pow(z, 2) / 2);
+                if (skewA !== 0) {
+                    let skewCorr = 1 + skewA * z;
+                    if (skewCorr > 0) skewFactor *= skewCorr;
+                    else skewFactor = 0;
+                }
+                let mainVal = skewFactor;
+                // 副峰高斯
+                let subZ = (x - subLoc) / subScale;
+                let subVal = subAmp * Math.exp(-0.5 * subZ * subZ);
+                baseCurve[i] = mainVal + subVal;
+            }
+            // 归一化最大值至1
+            let maxBase = Math.max(...baseCurve);
+            if (maxBase > 0) baseCurve = baseCurve.map(v => v / maxBase);
+            
+            // 高度缩放 (正比于报名人数)
+            const heightNorm = normApp[yearIndex];
+            const maxH = peakHeightPx * (0.6 + 0.4 * heightNorm);   // 山顶绝对高度(px)
+            const baseScaled = baseCurve.map(v => v * maxH);
+            
+            // 2. 生成多层轮廓线 (带噪声)
+            const layersRel = [];   // 每个元素是长度为nPoints的数组 (相对基底偏移量, 单位px)
+            for (let layer = 0; layer < nLayers; layer++) {
+                const altitude = Math.pow(layer / (nLayers - 1), 1.2);   // 海拔比例 0~1
+                let smooth = baseScaled.map(v => v * altitude);
+                
+                // 低频大尺度起伏 (模拟山体凸包)
+                const lowFreqAmp = 0.13 * altitude * (1 - altitude);
+                // 中频凹凸
+                const midFreqAmp = 0.08 * Math.sqrt(altitude);
+                // 高频碎石感
+                const highFreqAmp = 0.045 * Math.pow(altitude, 0.7);
+                
+                const periodLow = (widthLeft + widthRight) / 2.3;
+                const periodMid = (widthLeft + widthRight) / 5.2;
+                const periodHigh = (widthLeft + widthRight) / 18;
+                
+                for (let i = 0; i < nPoints; i++) {
+                    let x = xVals[i];
+                    let noise = 0;
+                    noise += lowFreqAmp * Math.sin(2 * Math.PI * x / periodLow + yearIndex * 1.2);
+                    noise += midFreqAmp * Math.sin(4 * Math.PI * x / periodMid + yearIndex * 2.3);
+                    noise += highFreqAmp * Math.sin(12 * Math.PI * x / periodHigh + yearIndex * 3.7);
+                    // 随机尖刺 (伪随机基于位置)
+                    let spikeProb = (Math.sin(x * 4.7 + yearIndex * 12) * 0.5 + 0.5) * 0.12 * altitude;
+                    if (Math.random() < 0.03 * (altitude+0.3)) {
+                        noise += 0.12 * Math.random() * altitude;
+                    }
+                    smooth[i] = Math.max(0, smooth[i] + noise * peakHeightPx * 0.25);
+                }
+                
+                // 保证层与层之间不交错 (平滑单调)
+                if (layer > 0) {
+                    for (let i = 0; i < nPoints; i++) {
+                        if (smooth[i] < layersRel[layer-1][i]) smooth[i] = layersRel[layer-1][i];
+                    }
+                }
+                layersRel.push(smooth);
+            }
+            
+            // 山顶尖端增强
+            const lastLayer = layersRel[layersRel.length-1];
+            const peakIdx = lastLayer.reduce((iMax, val, idx, arr) => val > arr[iMax] ? idx : iMax, 0);
+            for (let i = 0; i < nPoints; i++) {
+                let dist = Math.abs(i - peakIdx) / (nPoints/12);
+                let boost = 0.08 * peakHeightPx * Math.exp(-dist*dist/2);
+                layersRel[layersRel.length-1][i] += boost;
+            }
+            
+            // 转换绝对Y坐标: Y绝对 = baseY - layerHeight (因为canvas Y轴向下)
+            const absLayers = layersRel.map(layerArr => layerArr.map(h => baseY - h));
+            
+            return {
+                xVals: xVals,
+                absLayers: absLayers,        // 每一层轮廓线的Y坐标数组 (长度为 nLayers)
+                rawHeights: layersRel,        // 相对高度px (正值)
+                baseY: baseY
+            };
+        }
+        
+        // ========== 绘制山体 + 附加岩石纹理短线 ==========
+        function drawMountain(ctx, mountainData, yearIndex, baseColorNorm) {
+            const { xVals, absLayers, rawHeights, baseY } = mountainData;
+            if (!absLayers.length) return;
+            const nLayers = absLayers.length;
+            const nPoints = xVals.length;
+            
+            // 基底颜色 (根据报名人数)
+            const baseRGB = getColorByNorm(baseColorNorm);
+            
+            // 从下往上绘制每一层（最底层先画）
+            for (let l = 0; l < nLayers; l++) {
+                let yTop = absLayers[l];
+                let yBottom = (l === 0) ? baseY : absLayers[l-1];
+                // 海拔亮度
+                const brightness = 0.7 + 0.3 * (l / (nLayers-1));
+                const fillCol = lightenColor(baseRGB, brightness);
+                ctx.beginPath();
+                // 绘制填充多边形 (xVals, 上边缘 + 下边缘)
+                ctx.moveTo(xVals[0], yTop[0]);
+                for (let i = 1; i < nPoints; i++) ctx.lineTo(xVals[i], yTop[i]);
+                for (let i = nPoints-1; i >= 0; i--) ctx.lineTo(xVals[i], yBottom[i]);
+                ctx.closePath();
+                ctx.fillStyle = `rgb(${fillCol.r*255}, ${fillCol.g*255}, ${fillCol.b*255})`;
+                ctx.fill();
+                // 绘制上边缘线 (等高线)
+                ctx.beginPath();
+                ctx.moveTo(xVals[0], yTop[0]);
+                for (let i = 1; i < nPoints; i++) ctx.lineTo(xVals[i], yTop[i]);
+                ctx.strokeStyle = "rgba(0,0,0,0.3)";
+                ctx.lineWidth = 0.9;
+                ctx.stroke();
+            }
+            
+            // 添加岩石棱角短线和随机碎石 (增强自然感)
+            const peakLayerY = absLayers[absLayers.length-1];
+            const step = Math.floor(nPoints / 22);
+            for (let i = 0; i < nPoints; i += step) {
+                let x = xVals[i];
+                let yRock = peakLayerY[i];
+                if (yRock < baseY - 3) {
+                    ctx.beginPath();
+                    // 短线长度 3~6px
+                    const len = 3 + Math.random() * 4;
+                    const angle = (Math.sin(x * 2.3) * 0.8 + 0.2);
+                    ctx.moveTo(x, yRock);
+                    ctx.lineTo(x + (Math.random()-0.5)*3, yRock - len*0.7);
+                    ctx.strokeStyle = `rgba(20,20,20,0.5)`;
+                    ctx.lineWidth = 1.2;
+                    ctx.stroke();
+                    // 横向裂纹 (可选)
+                    if (Math.random() < 0.35) {
+                        ctx.beginPath();
+                        ctx.moveTo(x-2, yRock-1);
+                        ctx.lineTo(x+3, yRock-2);
+                        ctx.stroke();
+                    }
+                }
+            }
+            
+            // 额外随机凸起碎石点
+            for (let i=0; i<80; i++) {
+                let idx = Math.floor(Math.random() * nPoints);
+                let x = xVals[idx];
+                let y = peakLayerY[idx];
+                if (y < baseY - 8) {
+                    ctx.beginPath();
+                    ctx.arc(x + (Math.random()-0.5)*2, y - Math.random()*6, 1+Math.random()*2, 0, Math.PI*2);
+                    ctx.fillStyle = `rgba(70,50,30,0.6)`;
+                    ctx.fill();
+                }
+            }
+        }
+        
+        // ========== 构建多边形数据用于点击检测 (合并最外层轮廓) ==========
+        function buildClickPolygon(mountainData) {
+            const { xVals, absLayers, baseY } = mountainData;
+            if (!absLayers.length) return [];
+            const topLayer = absLayers[absLayers.length-1];
+            const polygon = [];
+            // 上边缘从左到右
+            for (let i=0; i<xVals.length; i++) polygon.push({x: xVals[i], y: topLayer[i]});
+            // 底部边缘从右到左
+            for (let i=xVals.length-1; i>=0; i--) polygon.push({x: xVals[i], y: baseY});
+            return polygon;
+        }
+        
+        // 点是否在多边形内 (射线法)
+        function isPointInPolygon(px, py, polygon) {
+            let inside = false;
+            for (let i = 0, j = polygon.length-1; i < polygon.length; j = i++) {
+                const xi = polygon[i].x, yi = polygon[i].y;
+                const xj = polygon[j].x, yj = polygon[j].y;
+                const intersect = ((yi > py) != (yj > py)) &&
+                    (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+        
+        // ========== 全部绘制入口 ==========
+        let allMountainsData = [];    // 存储每座山绘图数据
+        let allPolygons = [];          // 对应各山的点击多边形
+        
+        function renderAll() {
+            if (!ctx) return;
+            ctx.clearRect(0, 0, width, height);
+            // 背景渐变 (天空色)
+            const grad = ctx.createLinearGradient(0, 0, 0, height);
+            grad.addColorStop(0, "#eef4e0");
+            grad.addColorStop(1, "#f3edd8");
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+            
+            // 绘制纵向网格线 (人数刻度)
+            ctx.save();
+            ctx.globalAlpha = 0.3;
+            ctx.beginPath();
+            for (let w = 100; w <= 400; w += 50) {
+                let x = mapX(w); // 万人 -> canvas x
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, height);
+                ctx.strokeStyle = "#aaa";
+                ctx.stroke();
+            }
+            ctx.globalAlpha = 1;
+            
+            // 绘制横轴标注
+            ctx.font = "12px 'Segoe UI'";
+            ctx.fillStyle = "#4a5a3a";
+            for (let w = 50; w <= 400; w += 50) {
+                let x = mapX(w);
+                ctx.fillText(w + "万", x-12, height-18);
+            }
+            ctx.fillStyle = "#2c4a2e";
+            ctx.font = "bold 13px 'Segoe UI'";
+            ctx.fillText("← 报考人数 (万人) →", width/2-100, height-28);
+            
+            // 绘制每座山 (从下往上, 保证重叠正确)
+            for (let i = n-1; i >= 0; i--) {
+                const data = allMountainsData[i];
+                if (data) {
+                    drawMountain(ctx, data, i, normApp[i]);
+                    // 绘制额外年份标识线 (年基线)
+                    const baseY = data.baseY;
+                    ctx.beginPath();
+                    ctx.moveTo(20, baseY);
+                    ctx.lineTo(width-30, baseY);
+                    ctx.strokeStyle = "rgba(100,80,40,0.25)";
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                    // 右侧年份标签
+                    ctx.font = "bold 14px 'Segoe UI'";
+                    ctx.fillStyle = "#4d3b1f";
+                    ctx.shadowBlur = 0;
+                    ctx.fillText(years[i]+"年", width-55, baseY-5);
+                }
+            }
+            // 额外绘制石头高光
+            ctx.restore();
+        }
+        
+        // 万人坐标映射到canvas X (横轴范围 0~380万人)
+        function mapX(wan) {
+            const xMinVal = 20;    // 坐标0万人对应的canvas x
+            const xMaxVal = width-60; // 最大380万人
+            const maxWan = 380;
+            return xMinVal + (wan / maxWan) * (xMaxVal - xMinVal);
+        }
+        
+        // 准备所有山体数据 (基于实际人数位置)
+        function prepareMountains() {
+            allMountainsData = [];
+            allPolygons = [];
+            for (let i = 0; i < n; i++) {
+                const year = years[i];
+                const centerWan = applicants_wan[i];
+                const baseY = bottomBase - i * vertSpacing;
+                const peakHeightPx = 55 + 28 * normApp[i];   // 山峰最高点相对高度(px)
+                const mountain = generateRockyMountain(centerWan, i, peakHeightPx, baseY, 6, 210);
+                // 修正x坐标映射 (将万人转为canvas像素)
+                const xMapped = mountain.xVals.map(x => mapX(x));
+                const yLayersMapped = mountain.absLayers.map(layer => layer.map(y => y));
+                const mappedData = {
+                    xVals: xMapped,
+                    absLayers: yLayersMapped,
+                    rawHeights: mountain.rawHeights,
+                    baseY: baseY
+                };
+                allMountainsData.push(mappedData);
+                const poly = buildClickPolygon(mappedData);
+                allPolygons.push(poly);
+            }
+        }
+        
+        // 添加交互: canvas点击事件
+        function attachClickHandler() {
+            canvas.addEventListener('click', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;   // canvas物理像素比
+                const scaleY = canvas.height / rect.height;
+                const mouseX = (e.clientX - rect.left) * scaleX;
+                const mouseY = (e.clientY - rect.top) * scaleY;
+                
+                let hitIndex = -1;
+                for (let i = 0; i < allPolygons.length; i++) {
+                    if (isPointInPolygon(mouseX, mouseY, allPolygons[i])) {
+                        hitIndex = i;
+                        break;
+                    }
+                }
+                const statusDiv = document.getElementById('clickStatus');
+                if (hitIndex !== -1) {
+                    const year = years[hitIndex];
+                    const numPeople = applicants[hitIndex].toLocaleString();
+                    statusDiv.innerHTML = `🏔️ 点击山峰： ${year}年  |  📊 报考人数 ${numPeople} 人  ✨`;
+                    statusDiv.style.background = "#2f543a";
+                    setTimeout(() => {
+                        statusDiv.style.background = "#2c3e2f";
+                    }, 600);
+                } else {
+                    statusDiv.innerHTML = `🏔️ 点击任意山峰 —— 查看报考数据 (未点中山体区域)`;
+                }
+            });
+        }
+        
+        // 响应窗口尺寸变化? canvas固定逻辑尺寸，无需缩放重绘, 但保留重绘机制
+        function init() {
+            prepareMountains();
+            renderAll();
+            attachClickHandler();
+            // 可选增加悬浮高亮效果 (为了简洁未加)
+        }
+        init();
+    })();
+</script>
+</body>
+</html>
